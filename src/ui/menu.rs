@@ -329,13 +329,20 @@ pub fn handle_reseal() -> bool {
     clear_screen();
     banner();
     println!("  ВОССТАНОВЛЕНИЕ ПОДПИСИ ПРИЛОЖЕНИЯ\n");
+    let ok = reseal_installations(&roots);
+    pause();
+    ok
+}
+
+/// Re-sign every application bundle that belongs to the given installations.
+pub(crate) fn reseal_installations(roots: &[std::path::PathBuf]) -> bool {
     let mut ok = true;
     let mut seen: Vec<std::path::PathBuf> = Vec::new();
     for root in roots {
         let bundle = if root.extension().and_then(|ext| ext.to_str()) == Some("app") {
             Some(root.clone())
         } else {
-            find_targets_in_path(&root)
+            find_targets_in_path(root)
                 .iter()
                 .find_map(|target| crate::system::bundle::enclosing_app_bundle(&target.path))
         };
@@ -369,7 +376,6 @@ pub fn handle_reseal() -> bool {
     if seen.is_empty() {
         eprintln!("  \x1b[93m!\x1b[0m Установленные приложения не найдены");
     }
-    pause();
     ok
 }
 

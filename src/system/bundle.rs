@@ -394,6 +394,19 @@ mod tests {
         assert!(!seal_is_broken(&bundle), "подпись не восстановлена");
     }
 
+    /// The installation list of the utility repairs a damaged application.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installation_list_reseals_a_damaged_application() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = build_test_bundle(root.path());
+        std::fs::write(bundle.join("Contents/Resources/extra.bin"), b"patched").unwrap();
+        assert!(seal_is_broken(&bundle));
+
+        assert!(crate::ui::menu::reseal_installations(&[bundle.clone()]));
+        assert!(!seal_is_broken(&bundle));
+    }
+
     /// A small bundle with a helper application, similar to an Electron app.
     #[cfg(target_os = "macos")]
     fn build_test_bundle(root: &Path) -> PathBuf {
