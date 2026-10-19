@@ -317,6 +317,62 @@ pub fn handle_dns_only() -> bool {
     ok
 }
 
+/// Restore the code signature of an installed application. A patched file
+/// inside a signed bundle invalidates its signature, and macOS then refuses
+/// to start the application ("Antigravity is damaged").
+pub fn handle_reseal() -> bool {
+    let roots: Vec<std::path::PathBuf> = if let Some(path) = std::env::args().nth(2) {
+        vec![expand_env_vars(&path)]
+    } else {
+        find_installations()
+    };
+    clear_screen();
+    banner();
+    println!("  ВОССТАНОВЛЕНИЕ ПОДПИСИ ПРИЛОЖЕНИЯ\n");
+    let mut ok = true;
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
+    for root in roots {
+        let bundle = if root.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            Some(root.clone())
+        } else {
+            find_targets_in_path(&root)
+                .iter()
+                .find_map(|target| crate::system::bundle::enclosing_app_bundle(&target.path))
+        };
+        let Some(bundle) = bundle else {
+            continue;
+        };
+        if seen.contains(&bundle) {
+            continue;
+        }
+        seen.push(bundle.clone());
+        let broken = crate::system::bundle::seal_is_broken(&bundle);
+        match crate::system::bundle::reseal(&bundle) {
+            Ok(()) => println!(
+                "  \x1b[92m✓\x1b[0m {}: {}",
+                bundle.display(),
+                if broken {
+                    "подпись восстановлена"
+                } else {
+                    "подпись в порядке"
+                }
+            ),
+            Err(error) => {
+                operation_error(
+                    "Не удалось восстановить подпись приложения",
+                    &format!("{}: {error}", bundle.display()),
+                );
+                ok = false;
+            }
+        }
+    }
+    if seen.is_empty() {
+        eprintln!("  \x1b[93m!\x1b[0m Установленные приложения не найдены");
+    }
+    pause();
+    ok
+}
+
 fn check_vpn_before_setup() -> bool {
     match crate::net::preflight() {
         Ok(()) => true,

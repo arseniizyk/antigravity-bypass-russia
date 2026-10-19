@@ -451,7 +451,9 @@ fn prepare_for_write(path: &Path, data: Vec<u8>, kind: TargetKind) -> Result<Vec
                 "--force",
                 "--sign",
                 "-",
-                "--preserve-metadata=entitlements,requirements,flags",
+                // A local signature has no vendor identity, so the requirement
+                // of the original signature must not be kept.
+                "--preserve-metadata=entitlements,flags",
             ]
             .into_iter()
             .map(std::ffi::OsStr::new)
@@ -542,6 +544,9 @@ pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
+    // A journal inside a signed application bundle is moved out of it, so the
+    // bundle keeps a valid code signature.
+    journal::migrate_legacy_directory(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
     let legacy_x64 = target.kind == TargetKind::AgyCli && is_legacy_x64_cli(&before);
     let mut p = if legacy_x64 {
@@ -606,7 +611,17 @@ pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     } else {
         journal::apply(&target.path, Some(&before), &after, &p.profile)?;
     }
+    reseal_bundle(&target.path)?;
     Ok(PatchOutcome::Changed(p.changes))
+}
+
+/// A patched file inside a signed application bundle invalidates its code
+/// signature, and macOS then refuses to start the application ("Antigravity is
+/// damaged"). The bundle is re-signed so that it keeps launching.
+fn reseal_bundle(path: &Path) -> Result<(), String> {
+    crate::system::bundle::reseal_bundle_containing(path)
+        .map_err(|e| format!("Файл изменён, но подпись приложения не восстановлена: {e}"))?;
+    Ok(())
 }
 
 pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
@@ -614,6 +629,7 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
     ensure_file_closed(&target.path)?;
+    journal::migrate_legacy_directory(&target.path)?;
     let before = fs::read(&target.path).map_err(|e| e.to_string())?;
     let current_state = state_for_data(&before, target.kind);
     if current_state == BinaryState::Stock {
@@ -636,6 +652,7 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
         }
     }
     if journal::restore(&target.path)? {
+        reseal_bundle(&target.path)?;
         return Ok(PatchOutcome::Restored);
     }
     if matches!(target.kind, TargetKind::IdeAsar | TargetKind::IdeMainJs)
@@ -656,6 +673,7 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
                     Some(&before),
                     Some(&original),
                 )?;
+                reseal_bundle(&target.path)?;
                 return Ok(PatchOutcome::Restored);
             }
         }
