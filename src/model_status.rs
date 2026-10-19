@@ -21,6 +21,7 @@ pub enum State {
     StreamStarted,
     RegionBlocked,
     VerificationRequired,
+    ModelBusy,
     RequestFailed,
 }
 
@@ -60,6 +61,7 @@ impl Observation {
             State::StreamStarted => "В журнале: начало ответа",
             State::RegionBlocked => "В журнале: отказ по региону",
             State::VerificationRequired => "В журнале: нужна верификация",
+            State::ModelBusy => "В журнале: у модели нет свободных мощностей",
             State::RequestFailed => "В журнале: ошибка запроса",
         }
     }
@@ -69,6 +71,7 @@ impl Observation {
             State::Unreadable
                 | State::RegionBlocked
                 | State::VerificationRequired
+                | State::ModelBusy
                 | State::RequestFailed
         )
     }
@@ -85,8 +88,16 @@ fn from_config(config: &crate::net::config::Config) -> Observation {
     if !config.watch_region_errors {
         return Observation::empty(State::Disabled);
     }
+    // The saved configuration can carry outdated log locations, so the
+    // standard directories of the installed products are always included.
+    let mut roots = config.log_roots.clone();
+    for root in crate::net::config::current_log_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     scan(
-        &config.log_roots,
+        &roots,
         time::OffsetDateTime::now_utc().unix_timestamp(),
         local_offset(),
     )
@@ -233,7 +244,14 @@ fn event(line: &str, now: i64, offset: time::UtcOffset) -> Option<Event> {
         || message.contains("failed")
         || message.contains("permission_denied")
         || message.contains("permissiondenied");
-    let state = if rpc
+    let state = if message.contains("no capacity available for model")
+        || message.contains("model is overloaded")
+        || message.contains("resource_exhausted")
+    {
+        // The request reached the server and was refused because the model has
+        // no free capacity. The bypass works in this case.
+        State::ModelBusy
+    } else if rpc
         && error
         && (message.contains("not available in your location")
             || message.contains("not available in your region")
@@ -427,6 +445,12 @@ mod tests {
         assert_eq!(
             parse("2026-09-26T11:59:00Z [error] StreamGenerateContent: quota exceeded"),
             Some(State::RequestFailed)
+        );
+        // A model without free capacity is a server-side refusal, not a
+        // blocked region: the request reached Google.
+        assert_eq!(
+            parse("I0926 11:59:00.123456 1707 run.go:395] Run: attempt 1 failed (UNAVAILABLE (code 503): No capacity available for model gemini-3.8-flash-medium on the server), retrying in 4s"),
+            Some(State::ModelBusy)
         );
         for s in [
             "StreamGenerateContent ResponseID: old",
