@@ -24,12 +24,105 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn directory(path: &Path) -> PathBuf {
+    if let Some(dir) = bundle_backup_directory(path) {
+        return dir;
+    }
+    legacy_directory(path)
+}
+fn legacy_directory(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".ag-backups");
     path.with_file_name(name)
 }
+
+/// Files inside a signed application bundle are covered by the bundle seal: a
+/// new file next to them invalidates the signature and macOS refuses to launch
+/// the application. Their backups are therefore kept outside the bundle.
+fn bundle_backup_directory(path: &Path) -> Option<PathBuf> {
+    let bundle = crate::system::bundle::enclosing_app_bundle(path)?;
+    let file = path.file_name()?;
+    Some(
+        backup_root()
+            .join(backup_scope(&bundle))
+            .join(format!("{}.ag-backups", file.to_string_lossy())),
+    )
+}
+
+fn backup_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("ANTIGRAVITY_BYPASS_BACKUP_DIR") {
+        return PathBuf::from(dir);
+    }
+    crate::system::env::expand_env_vars("~").join(if cfg!(target_os = "macos") {
+        "Library/Application Support/AntigravityBypass/backups"
+    } else {
+        ".config/AntigravityBypass/backups"
+    })
+}
+
+fn backup_scope(bundle: &Path) -> String {
+    let name = bundle
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".to_string());
+    let hash = &digest(bundle.to_string_lossy().as_bytes())[..12];
+    format!("{}-{}", name.replace(['/', ':'], "-"), hash)
+}
+
+/// Move a journal that was written inside an application bundle to the
+/// external backup directory, so the bundle keeps a valid code signature.
+pub fn migrate_legacy_directory(path: &Path) -> Result<bool, String> {
+    let target = directory(path);
+    migrate_legacy_directory_to(path, &target)
+}
+
+fn migrate_legacy_directory_to(path: &Path, target: &Path) -> Result<bool, String> {
+    let legacy = legacy_directory(path);
+    if legacy == target || !legacy.exists() {
+        return Ok(false);
+    }
+    let parent = target.parent().ok_or("Нет каталога для backup")?;
+    super::fs_utils::create_private_directory(parent)?;
+    if target.exists() {
+        // Both journals exist: keep the older one next to the current one
+        // instead of inside the bundle.
+        let name = legacy.file_name().unwrap_or_default().to_string_lossy();
+        move_directory(&legacy, &parent.join(format!("legacy-{name}")))?;
+        return Ok(true);
+    }
+    move_directory(&legacy, target)?;
+    Ok(true)
+}
+
+fn move_directory(from: &Path, to: &Path) -> Result<(), String> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Different volumes: copy the content and drop the original.
+            fs::create_dir_all(to).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(from).map_err(|e| e.to_string())?.flatten() {
+                let target = to.join(entry.file_name());
+                fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+            }
+            fs::remove_dir_all(from).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+    }
+}
+/// The directory that currently holds the journal of `path`: the external
+/// location, or the legacy directory inside a bundle that was not moved yet.
+fn effective_directory(path: &Path) -> PathBuf {
+    let target = directory(path);
+    if target.exists() {
+        return target;
+    }
+    let legacy = legacy_directory(path);
+    if legacy.exists() {
+        return legacy;
+    }
+    target
+}
 fn record_path(path: &Path) -> PathBuf {
-    directory(path).join("current.json")
+    effective_directory(path).join("current.json")
 }
 
 pub fn apply(
@@ -63,6 +156,10 @@ fn apply_impl(
     if current.as_deref() != before {
         return Err("Файл изменён другим процессом; повторите проверку".into());
     }
+    // A journal inside an application bundle is moved out of it, so the bundle
+    // keeps a valid code signature. A failed move is not fatal: the journal
+    // stays readable where it is.
+    let _ = migrate_legacy_directory(path);
     let dir = directory(path);
     super::fs_utils::create_private_directory(&dir)?;
     let old_bytes = read_optional(&record_path(path))?;
@@ -138,7 +235,7 @@ fn load_record(path: &Path) -> Result<Option<Record>, String> {
 }
 
 fn original_bytes(path: &Path, record: &Record) -> Result<Vec<u8>, String> {
-    let bytes = fs::read(directory(path).join(format!("{}.bin", record.original)))
+    let bytes = fs::read(effective_directory(path).join(format!("{}.bin", record.original)))
         .map_err(|e| format!("Backup недоступен: {e}"))?;
     if digest(&bytes) != record.original {
         return Err("Хеш backup не совпадает; откат отменён".into());
@@ -164,7 +261,7 @@ pub fn recorded_modified_hash(path: &Path) -> Result<Option<String>, String> {
 }
 
 fn save_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let snapshot = directory(path).join(format!("{}.applied.bin", digest(bytes)));
+    let snapshot = effective_directory(path).join(format!("{}.applied.bin", digest(bytes)));
     match read_optional(&snapshot)? {
         Some(existing) if existing == bytes => Ok(()),
         Some(_) => Err("Повреждена копия применённых настроек".into()),
@@ -183,7 +280,7 @@ pub fn read_modified(path: &Path) -> Result<Option<Vec<Vec<u8>>>, String> {
     }
     let mut snapshots = Vec::new();
     for hash in std::iter::once(&record.modified).chain(record.previous.iter()) {
-        let bytes = fs::read(directory(path).join(format!("{hash}.applied.bin")))
+        let bytes = fs::read(effective_directory(path).join(format!("{hash}.applied.bin")))
             .map_err(|e| format!("Копия применённых настроек недоступна: {e}"))?;
         if digest(&bytes) != *hash {
             return Err("Повреждена копия применённых настроек".into());
@@ -205,7 +302,7 @@ pub fn verified_original(path: &Path, expected: &[u8]) -> Result<Option<Vec<u8>>
 }
 
 fn archive_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let archive = directory(path).join(format!("{}.record.json", digest(bytes)));
+    let archive = effective_directory(path).join(format!("{}.record.json", digest(bytes)));
     match read_optional(&archive)? {
         Some(existing) if existing == bytes => Ok(()),
         Some(_) => Err("Архив журнала повреждён".into()),
@@ -473,5 +570,43 @@ mod tests {
         apply(&p, Some(b"// comment\r\n{}"), b"changed", "settings").unwrap();
         restore(&p).unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"// comment\r\n{}");
+    }
+
+    #[test]
+    fn backups_of_files_inside_a_bundle_are_kept_outside_of_it() {
+        let path =
+            Path::new("/Applications/Antigravity.app/Contents/Resources/bin/language_server");
+        let dir = directory(path);
+        assert!(!dir.starts_with("/Applications/Antigravity.app"), "{dir:?}");
+        assert!(dir.ends_with("language_server.ag-backups"), "{dir:?}");
+    }
+
+    #[test]
+    fn a_journal_inside_a_bundle_is_moved_out_of_it() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("Antigravity.app/Contents/Resources/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let file = bin.join("language_server");
+        fs::write(&file, b"patched").unwrap();
+        let legacy = legacy_directory(&file);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("current.json"), b"{}").unwrap();
+
+        let outside = d.path().join("backups/language_server.ag-backups");
+        assert!(migrate_legacy_directory_to(&file, &outside).unwrap());
+        assert!(!legacy.exists(), "журнал остался внутри бандла");
+        assert!(outside.join("current.json").exists());
+    }
+
+    #[test]
+    fn a_journal_outside_a_bundle_stays_where_it_is() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("settings.json");
+        fs::write(&file, b"{}").unwrap();
+        let legacy = legacy_directory(&file);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("current.json"), b"{}").unwrap();
+        assert!(!migrate_legacy_directory(&file).unwrap());
+        assert!(legacy.exists());
     }
 }

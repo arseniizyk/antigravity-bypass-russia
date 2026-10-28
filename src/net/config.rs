@@ -67,10 +67,15 @@ fn user_root() -> PathBuf {
     base.join("AntigravityBypass").join("network")
 }
 
-fn user_log_roots() -> Vec<PathBuf> {
-    if crate::system::env::args().any(|arg| arg == crate::system::service::FORWARDER_FLAG) {
+/// Log directories of the installed products on this machine.
+pub fn current_log_roots() -> Vec<PathBuf> {
+    if std::env::args().any(|arg| arg == crate::system::service::FORWARDER_FLAG) {
         return context().map(|c| c.log_roots).unwrap_or_default();
     }
+    user_log_roots()
+}
+
+fn user_log_roots() -> Vec<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
@@ -81,12 +86,25 @@ fn user_log_roots() -> Vec<PathBuf> {
             ".config"
         }),
     );
-    base.into_iter()
+    let mut roots: Vec<PathBuf> = base
+        .into_iter()
         .flat_map(|base| {
             ["Antigravity", "Antigravity IDE", "Google Antigravity"]
                 .map(|product| base.join(product).join("logs"))
         })
-        .collect()
+        .collect();
+    // On macOS the IDE writes its logs to ~/Library/Logs/<Product>.
+    #[cfg(target_os = "macos")]
+    roots.extend(
+        ["Antigravity", "Antigravity IDE", "Google Antigravity"]
+            .iter()
+            .map(|product| {
+                crate::system::env::expand_env_vars("~")
+                    .join("Library/Logs")
+                    .join(product)
+            }),
+    );
+    roots
 }
 
 fn context_path() -> PathBuf {

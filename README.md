@@ -180,6 +180,21 @@ chmod +x scripts/unlock_and_restore.sh
 </p>
 </details>
 
+<details>
+<summary><b>7. macOS: «Antigravity повреждён и не может быть открыт»</b></summary>
+<p>
+macOS подписывает приложение целиком: печать (<code>CodeResources</code>) покрывает каждый файл внутри <code>Antigravity.app</code>. Любая правка файла внутри бандла (в том числе резервная копия рядом с ним) ломает подпись, и система отказывается запускать приложение.
+<br><br>
+Утилита решает это сама: резервные копии файлов приложения хранятся <b>вне бандла</b> (в <code>~/Library/Application Support/AntigravityBypass/backups</code>), а после правки приложение переподписывается локально, поэтому оно продолжает запускаться.
+<br><br>
+Если подпись всё же оказалась нарушена (например, приложение обновилось вручную), восстановите её одной командой:
+<br>
+<code>sudo antigravity-bypass-russia reseal</code>
+<br><br>
+Подробности: <a href="docs/macos-bundle-signature.md">docs/macos-bundle-signature.md</a>.
+</p>
+</details>
+
 ---
 
 ## ↩️ Чистый откат

@@ -109,24 +109,43 @@ pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
 }
 
 pub(super) fn create_private_directory(path: &Path) -> Result<(), String> {
-    let builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    let mut builder = builder;
+    #[cfg(not(unix))]
+    {
+        match fs::DirBuilder::new().create(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => match fs::symlink_metadata(path)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            {
+                true => Ok(()),
+                false => Err("Каталог backup не является обычным каталогом".into()),
+            },
+            Err(error) => Err(format!("Backup: {error}")),
+        }
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
-        Ok(()) => inherit_directory_owner(path),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) {
-                Ok(())
-            } else {
-                Err("Каталог backup не является обычным каталогом".into())
-            }
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // The journal backup directory may be nested under a root that does not
+        // exist yet, so create the whole chain instead of failing at the leaf.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|error| format!("Backup: {error}"))?;
         }
-        Err(error) => Err(format!("Backup: {error}")),
+        let created = fs::DirBuilder::new().mode(0o700).create(path);
+        match created.err() {
+            None => (),
+            Some(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::symlink_metadata(path)
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                {
+                    // A previously created directory is reused as-is.
+                } else {
+                    return Err("Каталог backup не является обычным каталогом".into());
+                }
+            }
+            Some(error) => return Err(format!("Backup: {error}")),
+        }
+        inherit_directory_owner(path)?;
+        Ok(())
     }
 }
 

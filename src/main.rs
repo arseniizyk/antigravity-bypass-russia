@@ -18,6 +18,7 @@ fn print_help() {
           report        Сохранить диагностику в JSON [необязательный каталог]\n\
           speed         Показать режим прямого подключения\n\
           rollback      Отключить обход и восстановить сохранённые настройки\n\
+          reseal        Восстановить подпись установленного приложения (macOS)\n\
           status        Отображение текущего статуса системы и выход\n\n\
         Опции:\n\
           -h, --help    Показать эту справку\n\
@@ -70,6 +71,7 @@ fn main() {
             | "dns"
             | "rollback"
             | "restore"
+            | "reseal"
             | "tune"
             | "--tune"
     ) {
@@ -77,7 +79,10 @@ fn main() {
         std::process::exit(2);
     }
     if args.len()
-        > if matches!(command, "patch-files" | "rollback" | "restore" | "report") {
+        > if matches!(
+            command,
+            "patch-files" | "rollback" | "restore" | "reseal" | "report"
+        ) {
             3
         } else {
             2
@@ -113,6 +118,7 @@ fn main() {
         "dns" => ui::menu::handle_dns_only(),
         "speed" => ui::speed::run(),
         "rollback" | "restore" => ui::menu::handle_rollback(),
+        "reseal" => ui::menu::handle_reseal(),
         "tune" | "--tune" => match net::socket::tune_os_network_stack() {
             Ok(logs) => {
                 for log in logs {
